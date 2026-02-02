@@ -85,22 +85,24 @@ async def list_tasks(
 async def task_detail(
     request: Request,
     body: TaskDetailRequest,
-    principal: Principal = Depends(get_principal),
+    token_data = Depends(get_current_user),
 ) -> dict:
     log.info(
-        "task.detail.start request_id=%s tenant_id=%s user_id=%s external_id=%s",
-        body.request_id,
-        principal.tenant_id,
-        principal.user_id,
+        "task.detail.start tenant_id=%s user_id=%s external_id=%s",
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
         body.external_id,
     )
+    tenant_id = token_data.get("tenantId", "")
+    user_id = token_data.get("sub", "unknown")
+    role = token_data.get("role", "unknown")
     svc = _service(request)
-    data = await svc.get_task_detail(principal, body)
+    data = await svc.get_task_detail(tenant_id, user_id, role, body)
     log.info(
         "task.detail.done request_id=%s tenant_id=%s user_id=%s external_id=%s",
         body.request_id,
-        principal.tenant_id,
-        principal.user_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
         body.external_id,
     )
     return success(data, message="Request successful")

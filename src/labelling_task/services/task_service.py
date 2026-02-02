@@ -269,18 +269,18 @@ class TaskService:
         )
         return out
 
-    async def get_task_detail(self, principal: Principal, req: TaskDetailRequest) -> dict[str, Any]:
+    async def get_task_detail(self, tenant_id: str, user_id: str, role: str, req: TaskDetailRequest) -> dict[str, Any]:
         log.info(
             "svc.task.detail start request_id=%s tenant_id=%s user_id=%s external_id=%s",
             req.request_id,
-            principal.tenant_id,
-            principal.user_id,
+            tenant_id,
+            user_id,
             req.external_id,
         )
-        doc = await self._repo.get_by_external_id(tenant_id=principal.tenant_id, external_id=req.external_id)
+        doc = await self._repo.get_by_external_id(tenant_id=tenant_id, external_id=req.external_id)
 
         # Non-admins: only tasks allocated to them
-        if principal.role not in {"Admin", "Super Admin", "SuperAdmin"} and doc.get("allocated_to") != principal.user_id:
+        if role not in {"Admin", "Super Admin", "SuperAdmin"} and doc.get("allocated_to") != user_id:
             raise ForbiddenError("forbidden")
 
         doc = oid_to_str(doc)
@@ -292,7 +292,7 @@ class TaskService:
         log.info(
             "svc.task.detail done request_id=%s tenant_id=%s external_id=%s",
             req.request_id,
-            principal.tenant_id,
+            tenant_id,
             req.external_id,
         )
         return doc

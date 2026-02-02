@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_stream_tasks: str = "lt:stream:tasks"
     redis_stream_reviews: str = "lt:stream:reviews"
+    redis_stream_zip_jobs: str = "lt:stream:zip_jobs"
 
     # ----------------------------
     # OAuth / JWKS
@@ -51,10 +52,11 @@ class Settings(BaseSettings):
     CORS_ORIGINS: Any = Field(default_factory=list)
 
     # ----------------------------
-    # S3
+    # S3 / Upload service
     # ----------------------------
     s3_bucket: str = "labelling-task"
     s3_region: str = "us-east-1"
+    upload_service_base_url: str = "http://localhost:8082"
 
     # ----------------------------
     # JWT
@@ -69,6 +71,12 @@ class Settings(BaseSettings):
     # Retention
     # ----------------------------
     deleted_retention_days: int = 90
+    
+    # ----------------------------
+    # Zip worker / consumer
+    # ----------------------------
+    zip_consumer_group: str = "lt-zip-consumers"
+    zip_consumer_name: str = "lt-zip-worker-1"
     
     # Pydantic settings config (v2 style)
     model_config = SettingsConfigDict(

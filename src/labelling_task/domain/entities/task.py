@@ -59,10 +59,11 @@ class Task(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+    parent_external_id: str | None = None
 
 
 class Envelope(BaseModel):
-    request_id: str
+    request_id: str | None = None
 
 
 class TaskCreateRequest(Envelope):

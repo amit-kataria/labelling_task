@@ -14,7 +14,10 @@ from labelling_task.routers.task_router import router as task_router
 from labelling_task.utils.response import failure
 from fastapi.middleware.cors import CORSMiddleware
 from labelling_task.configs.logging_config import get_logger, setup_logging
+from labelling_task.services.zip_processing_service import ZipProcessingService
+import asyncio
 import time
+import httpx
 log = get_logger(__name__)
 
 
@@ -92,17 +95,99 @@ def create_app() -> FastAPI:
         app.state.mongo_client = mongo_client
         app.state.mongo_db = mongo_db
         app.state.redis = redis_client.client
-        
+
         repo = TaskRepository(mongo_db, settings)
         log.info("startup.ensure_indexes begin")
         # await repo.ensure_indexes()
         log.info("startup.ensure_indexes skipped")
         app.state.task_repo = repo
 
+        # Set up HTTP client and ZIP processing worker
+        http_client = httpx.AsyncClient(timeout=60.0)
+        app.state.http_client = http_client
+        zip_service = ZipProcessingService(
+            repo=repo,
+            redis_client=redis_client.client,
+            settings=settings,
+            http_client=http_client,
+        )
+        app.state.zip_service = zip_service
+
+        async def zip_worker() -> None:
+            stream = settings.redis_stream_zip_jobs
+            group = settings.zip_consumer_group
+            consumer = settings.zip_consumer_name
+
+            # Ensure consumer group exists
+            try:
+                await redis_client.client.xgroup_create(stream, group, id="0", mkstream=True)
+                log.info("zip_worker.group_created stream=%s group=%s", stream, group)
+            except Exception as exc:
+                if "BUSYGROUP" not in str(exc):
+                    log.error("zip_worker.group_create_failed %s", str(exc))
+
+            log.info("zip_worker.start stream=%s group=%s consumer=%s", stream, group, consumer)
+            while True:
+                try:
+                    resp = await redis_client.client.xreadgroup(
+                        groupname=group,
+                        consumername=consumer,
+                        streams={stream: ">"},
+                        count=1,
+                        block=5000,
+                    )
+                    if not resp:
+                        continue
+
+                    for _, messages in resp:
+                        for message_id, fields in messages:
+                            data = fields
+                            document_id = data.get("document_id") or data.get("file_id")
+                            project_external_id = data.get("project_external_id")
+                            tenant_id = data.get("tenant_id")
+                            request_id = data.get("request_id")
+
+                            if not document_id or not project_external_id or not tenant_id:
+                                log.warning(
+                                    "zip_worker.skip message_id=%s missing_required_fields=%s",
+                                    message_id,
+                                    data,
+                                )
+                                await redis_client.client.xack(stream, group, message_id)
+                                continue
+
+                            try:
+                                await zip_service.process_zip_job(
+                                    tenant_id=str(tenant_id),
+                                    document_id=str(document_id),
+                                    project_external_id=str(project_external_id),
+                                    request_id=str(request_id) if request_id else None,
+                                )
+                                await redis_client.client.xack(stream, group, message_id)
+                            except Exception as exc:
+                                log.error(
+                                    "zip_worker.processing_failed message_id=%s error=%s",
+                                    message_id,
+                                    str(exc),
+                                    exc_info=True,
+                                )
+                except Exception as loop_exc:
+                    log.error("zip_worker.loop_error %s", str(loop_exc), exc_info=True)
+                    await asyncio.sleep(5)
+
+        app.state.zip_worker_task = asyncio.create_task(zip_worker())
+
     @app.on_event("shutdown")
     async def shutdown() -> None:
         log.info("shutdown.begin")
         await redis_client.close()
+        # Cancel zip worker
+        worker = getattr(app.state, "zip_worker_task", None)
+        if worker:
+            worker.cancel()
+        http_client = getattr(app.state, "http_client", None)
+        if http_client is not None:
+            await http_client.aclose()
         mongo_client = getattr(app.state, "mongo_client", None)
         if mongo_client is not None:
             mongo_client.close()
