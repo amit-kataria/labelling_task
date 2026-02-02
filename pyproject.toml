@@ -2,6 +2,9 @@
  requires = ["setuptools>=69", "wheel"]
  build-backend = "setuptools.build_meta"
  
+ [project.scripts]
+labelling_task = "labelling_task.main:app"
+
  [project]
  name = "labelling_task"
  version = "0.1.0"

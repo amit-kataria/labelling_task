@@ -1,12 +1,12 @@
-from labelling_task.utils.redis_client import redis_client
+from labelling_task.repositories.redis_client import redis_client
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError, ExpiredSignatureError
-from labelling_task.config.config import config
 import time
 import threading
 import requests
 from labelling_task.configs.logging_config import get_logger
+from labelling_task.configs.settings import get_settings
 
 log = get_logger(__name__)
 
@@ -58,7 +58,8 @@ class JWKSCache:
 
 class JWTValidator:
     def __init__(self):
-        self.jwks_url = config.JWKS_URL
+        settings = get_settings()
+        self.jwks_url = settings.JWKS_URL
         self.jwks_keys = {}
 
     def fetch_jwks(self):
@@ -162,10 +163,11 @@ class JWTValidator:
                 detail="Token replay detected",
             )
 
-        await redis_client.expire(key, ttl)
+        await redis_client.client.expire(key, ttl)
 
 
-jwks_cache = JWKSCache(config.JWKS_URL)
+_settings = get_settings()
+jwks_cache = JWKSCache(_settings.JWKS_URL)
 validator = JWTValidator()
 
 

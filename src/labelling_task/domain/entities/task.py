@@ -73,8 +73,13 @@ class TaskCreateRequest(Envelope):
 
 
 class FilterClause(BaseModel):
-    operator: Literal["eq", "gte", "lte", "in", "regex"]
+    operator: Literal["eq", "ne", "gte", "lte", "in", "regex"]
     value: Any
+
+
+class SortSpec(BaseModel):
+    field: str
+    direction: Literal["asc", "desc"] = "asc"
 
 
 class TaskListRequest(Envelope):
@@ -82,7 +87,7 @@ class TaskListRequest(Envelope):
     fields: list[str] | None = None
     page: int = 0
     size: int = 10
-    sort: list[dict[str, Literal["asc", "desc"]]] = Field(default_factory=list)
+    sort: list[SortSpec] = Field(default_factory=list)
 
 
 class TaskDetailRequest(Envelope):

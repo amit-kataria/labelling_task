@@ -8,7 +8,7 @@ from typing import Any
 import redis.asyncio as redis
 
 from labelling_task.auth.models import Principal
-from labelling_task.domain.entities.task import FilterClause, TaskCreateRequest, TaskDetailRequest, TaskListRequest
+from labelling_task.domain.entities.task import FilterClause, TaskCreateRequest, TaskDetailRequest, TaskListRequest, SortSpec
 from labelling_task.errors import ForbiddenError
 from labelling_task.configs.settings import get_settings
 from labelling_task.repositories.task_repository import TaskRepository, dt_to_iso, oid_to_str
@@ -20,6 +20,8 @@ def _mongo_op(clause: FilterClause) -> dict[str, Any]:
     val = clause.value
     if op == "eq":
         return val
+    if op == "ne":
+        return {"$ne": val}
     if op == "gte":
         return {"$gte": val}
     if op == "lte":
@@ -52,12 +54,13 @@ def build_query(filters: dict[str, FilterClause]) -> dict[str, Any]:
     for field, clause in filters.items():
         value = clause.value
         if field in {"created_on", "created_at"}:
-            field = "created_at"
+            field = "created_on"
             value = _parse_datetime(value)
         if field in {"updated_on", "updated_at"}:
-            field = "updated_at"
+            field = "updated_on"
             value = _parse_datetime(value)
         q[field] = _mongo_op(FilterClause(operator=clause.operator, value=value))
+        log.debug(f"built_query: {q}")
     return q
 
 
@@ -80,11 +83,15 @@ def build_projection(fields: list[str] | None) -> dict[str, int] | None:
     return proj
 
 
-def build_sort(sort_spec: list[dict[str, str]]) -> list[tuple[str, int]]:
+def build_sort(sort_spec: list[SortSpec] | list[dict[str, str]]) -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for s in sort_spec or []:
-        field = s.get("field")
-        direction = s.get("direction", "asc").lower()
+        if isinstance(s, SortSpec):
+            field = s.field
+            direction = s.direction.lower()
+        else:
+            field = s.get("field")
+            direction = s.get("direction", "asc").lower()
         if field in {"created_on", "created_at"}:
             field = "created_at"
         if field in {"updated_on", "updated_at"}:
@@ -101,6 +108,13 @@ class TaskService:
         self._redis = redis_client
 
     async def create_task(self, principal: Principal, req: TaskCreateRequest) -> dict[str, Any]:
+        log.info(
+            "svc.task.create start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+            req.request_id,
+            principal.tenant_id,
+            principal.user_id,
+            req.external_id,
+        )
         if principal.role not in {"Admin", "Super Admin", "SuperAdmin"}:
             raise ForbiddenError("only admin can create tasks")
 
@@ -121,9 +135,23 @@ class TaskService:
         }
 
         _id = await self._repo.insert(doc)
+        log.info(
+            "svc.task.create inserted request_id=%s tenant_id=%s external_id=%s id=%s",
+            req.request_id,
+            principal.tenant_id,
+            req.external_id,
+            _id,
+        )
 
         # Enqueue allocation event (Redis Streams).
         settings = get_settings()
+        log.info(
+            "svc.task.create enqueue stream=%s request_id=%s tenant_id=%s external_id=%s",
+            settings.redis_stream_tasks,
+            req.request_id,
+            principal.tenant_id,
+            req.external_id,
+        )
         await self._redis.xadd(
             settings.redis_stream_tasks,
             {
@@ -140,6 +168,13 @@ class TaskService:
 
         # Cache static-ish details (instructions/labels) for quick UI access.
         cache_key = f"lt:taskmeta:{principal.tenant_id}:{req.external_id}"
+        log.info(
+            "svc.task.create cache_set key=%s request_id=%s tenant_id=%s external_id=%s",
+            cache_key,
+            req.request_id,
+            principal.tenant_id,
+            req.external_id,
+        )
         await self._redis.setex(
             cache_key,
             3600,
@@ -152,7 +187,7 @@ class TaskService:
             ),
         )
 
-        return {
+        out = {
             "id": _id,
             "external_id": req.external_id,
             "org": req.org,
@@ -163,21 +198,44 @@ class TaskService:
             "updated_on": dt_to_iso(now),
             "task_details": req.task_details.model_dump(),
         }
+        log.info(
+            "svc.task.create done request_id=%s tenant_id=%s external_id=%s",
+            req.request_id,
+            principal.tenant_id,
+            req.external_id,
+        )
+        return out
 
-    async def list_tasks(self, principal: Principal, req: TaskListRequest) -> dict[str, Any]:
+    async def list_tasks(self, tenant_id: str, user_id: str, role: str, req: TaskListRequest) -> dict[str, Any]:
+        log.info(
+            "svc.task.list start request_id=%s tenant_id=%s user_id=%s role=%s",
+            req.request_id,
+            tenant_id,
+            user_id,
+            role,
+        )
         query = build_query(req.filters)
 
         # Non-admins can only see their own tasks.
-        if principal.role not in {"Admin", "Super Admin", "SuperAdmin"}:
-            query["allocated_to"] = principal.user_id
+        if role not in {"Admin", "Super Admin", "SuperAdmin"}:
+            query["allocated_to"] = user_id
 
         projection = build_projection(req.fields)
         sort = build_sort(req.sort)
         skip = max(req.page, 0) * max(req.size, 1)
         limit = max(min(req.size, 100), 1)
 
+        log.info(
+            "svc.task.list query request_id=%s tenant_id=%s skip=%s limit=%s sort=%s query_keys=%s",
+            req.request_id,
+            tenant_id,
+            skip,
+            limit,
+            sort,
+            sorted(list(query.keys())),
+        )
         items, total = await self._repo.list(
-            tenant_id=principal.tenant_id,
+            tenant_id=tenant_id,
             query=query,
             projection=projection,
             skip=skip,
@@ -196,14 +254,29 @@ class TaskService:
             tasks_out.append(it)
 
         total_pages = ceil(total / limit) if limit else 0
-        return {
+        out = {
             "tasks": tasks_out,
             "totalElements": total,
             "totalPages": total_pages,
             "currentPage": req.page,
         }
+        log.info(
+            "svc.task.list done request_id=%s tenant_id=%s returned=%s total=%s",
+            req.request_id,
+            tenant_id,
+            len(tasks_out),
+            total,
+        )
+        return out
 
     async def get_task_detail(self, principal: Principal, req: TaskDetailRequest) -> dict[str, Any]:
+        log.info(
+            "svc.task.detail start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+            req.request_id,
+            principal.tenant_id,
+            principal.user_id,
+            req.external_id,
+        )
         doc = await self._repo.get_by_external_id(tenant_id=principal.tenant_id, external_id=req.external_id)
 
         # Non-admins: only tasks allocated to them
@@ -216,4 +289,10 @@ class TaskService:
         doc.pop("created_at", None)
         doc.pop("updated_at", None)
         doc.pop("tenant_id", None)
+        log.info(
+            "svc.task.detail done request_id=%s tenant_id=%s external_id=%s",
+            req.request_id,
+            principal.tenant_id,
+            req.external_id,
+        )
         return doc

@@ -59,7 +59,7 @@ def setup_logging():
             "requests": {"level": "WARNING"},
             "motor": {"level": "WARNING"},
             "pymongo": {"level": "WARNING"},
-            "pymongo.command": {"level": "WARNING"},
+            "pymongo.command": {"level": "DEBUG"},
             "pymongo.connection": {"level": "WARNING"},
             "pymongo.serverSelection": {"level": "WARNING"},
             "redis": {"level": "WARNING"},

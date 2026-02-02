@@ -19,8 +19,9 @@ def decode_token(token: str, settings: Settings) -> dict[str, Any]:
     - If you need RS256 + JWKS, implement key fetch/caching from settings.jwt_jwks_url.
     """
     try:
+        log.info("jwt.decode start alg=%s iss=%s aud=%s", settings.jwt_alg, settings.jwt_issuer, settings.jwt_audience)
         options = {"verify_aud": settings.jwt_audience is not None}
-        return jwt.decode(
+        claims = jwt.decode(
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_alg],
@@ -28,6 +29,8 @@ def decode_token(token: str, settings: Settings) -> dict[str, Any]:
             issuer=settings.jwt_issuer,
             options=options,
         )
+        log.info("jwt.decode ok sub=%s tenantId=%s role=%s", claims.get("sub"), claims.get("tenantId"), claims.get("role"))
+        return claims
     except JWTError as e:
         log.info("JWT decode failed: %s", str(e))
         raise AuthError("invalid token") from e
