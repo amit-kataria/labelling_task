@@ -8,12 +8,21 @@ from typing import Any
 import redis.asyncio as redis
 
 from labelling_task.auth.models import Principal
-from labelling_task.domain.entities.task import FilterClause, TaskCreateRequest, TaskDetailRequest, TaskListRequest, SortSpec
+from labelling_task.domain.entities.task import (
+    FilterClause,
+    TaskCreateRequest,
+    TaskDetailRequest,
+    TaskListRequest,
+    SortSpec,
+    TaskActionRequest,
+)
 from labelling_task.errors import ForbiddenError
 from labelling_task.configs.settings import get_settings
 from labelling_task.repositories.task_repository import TaskRepository, dt_to_iso, oid_to_str
 from labelling_task.configs.logging_config import get_logger
+
 log = get_logger(__name__)
+
 
 def _mongo_op(clause: FilterClause) -> dict[str, Any]:
     op = clause.operator
@@ -206,7 +215,9 @@ class TaskService:
         )
         return out
 
-    async def list_tasks(self, tenant_id: str, user_id: str, role: str, req: TaskListRequest) -> dict[str, Any]:
+    async def list_tasks(
+        self, tenant_id: str, user_id: str, role: str, req: TaskListRequest
+    ) -> dict[str, Any]:
         log.info(
             "svc.task.list start request_id=%s tenant_id=%s user_id=%s role=%s",
             req.request_id,
@@ -269,7 +280,9 @@ class TaskService:
         )
         return out
 
-    async def get_task_detail(self, tenant_id: str, user_id: str, role: str, req: TaskDetailRequest) -> dict[str, Any]:
+    async def get_task_detail(
+        self, tenant_id: str, user_id: str, role: str, req: TaskDetailRequest
+    ) -> dict[str, Any]:
         log.info(
             "svc.task.detail start request_id=%s tenant_id=%s user_id=%s external_id=%s",
             req.request_id,
@@ -280,7 +293,10 @@ class TaskService:
         doc = await self._repo.get_by_external_id(tenant_id=tenant_id, external_id=req.external_id)
 
         # Non-admins: only tasks allocated to them
-        if role not in {"Admin", "Super Admin", "SuperAdmin"} and doc.get("allocated_to") != user_id:
+        if (
+            role not in {"Admin", "Super Admin", "SuperAdmin"}
+            and doc.get("allocated_to") != user_id
+        ):
             raise ForbiddenError("forbidden")
 
         doc = oid_to_str(doc)
@@ -296,3 +312,56 @@ class TaskService:
             req.external_id,
         )
         return doc
+
+    async def update_task_status(
+        self,
+        tenant_id: str,
+        user_id: str,
+        req: TaskActionRequest,
+        new_status: str,
+    ) -> dict[str, Any]:
+        log.info(
+            "svc.task.update_status start request_id=%s tenant_id=%s user_id=%s external_id=%s status=%s",
+            req.request_id,
+            tenant_id,
+            user_id,
+            req.external_id,
+            new_status,
+        )
+
+        doc = await self._repo.update_status(
+            tenant_id=tenant_id,
+            external_id=req.external_id,
+            status=new_status,
+            updated_by=user_id,
+        )
+
+        log.info(
+            "svc.task.update_status success request_id=%s tenant_id=%s external_id=%s status=%s",
+            req.request_id,
+            tenant_id,
+            req.external_id,
+            new_status,
+        )
+        # Enqueue event (Redis Streams).
+        settings = get_settings()
+        await self._redis.xadd(
+            settings.redis_stream_tasks,
+            {
+                "event": "TASK_STATUS_UPDATED",
+                "tenant_id": tenant_id,
+                "external_id": req.external_id,
+                "status": new_status,
+                "updated_by": user_id,
+                "request_id": req.request_id or "",
+            },
+        )
+
+        doc = oid_to_str(doc)
+        doc["created_on"] = dt_to_iso(doc.get("created_at"))
+        doc["updated_on"] = dt_to_iso(doc.get("updated_at"))
+        doc.pop("created_at", None)
+        doc.pop("updated_at", None)
+        doc.pop("tenant_id", None)
+        return doc
+Line 368:

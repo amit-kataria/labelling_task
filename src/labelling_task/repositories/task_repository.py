@@ -9,7 +9,9 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from labelling_task.configs.settings import Settings
 from labelling_task.errors import NotFoundError
 from labelling_task.configs.logging_config import get_logger
+
 log = get_logger(__name__)
+
 
 class TaskRepository:
     def __init__(self, db: AsyncIOMotorDatabase, settings: Settings):
@@ -48,9 +50,15 @@ class TaskRepository:
 
     async def get_by_external_id(self, *, tenant_id: str, external_id: str) -> dict[str, Any]:
         log.info("repo.task.get_by_external_id tenant_id=%s external_id=%s", tenant_id, external_id)
-        doc = await self._col.find_one({"tenant_id": tenant_id, "external_id": external_id, "deleted_at": None})
+        doc = await self._col.find_one(
+            {"tenant_id": tenant_id, "external_id": external_id, "deleted_at": None}
+        )
         if not doc:
-            log.info("repo.task.get_by_external_id not_found tenant_id=%s external_id=%s", tenant_id, external_id)
+            log.info(
+                "repo.task.get_by_external_id not_found tenant_id=%s external_id=%s",
+                tenant_id,
+                external_id,
+            )
             raise NotFoundError("task not found")
         return doc
 
@@ -78,6 +86,35 @@ class TaskRepository:
         items = await cursor.to_list(length=limit)
         total = await self._col.count_documents(q)
         return items, total
+
+    async def update_status(
+        self,
+        *,
+        tenant_id: str,
+        external_id: str,
+        status: str,
+        updated_by: str,
+    ) -> dict[str, Any]:
+        log.info(
+            "repo.task.update_status tenant_id=%s external_id=%s status=%s",
+            tenant_id,
+            external_id,
+            status,
+        )
+        now = datetime.now(timezone.utc)
+        doc = await self._col.find_one_and_update(
+            {"tenant_id": tenant_id, "external_id": external_id, "deleted_at": None},
+            {"$set": {"status": status, "updated_by": updated_by, "updated_at": now}},
+            return_document=True,
+        )
+        if not doc:
+            log.info(
+                "repo.task.update_status not_found tenant_id=%s external_id=%s",
+                tenant_id,
+                external_id,
+            )
+            raise NotFoundError("task not found")
+        return doc
 
 
 def oid_to_str(doc: dict[str, Any]) -> dict[str, Any]:

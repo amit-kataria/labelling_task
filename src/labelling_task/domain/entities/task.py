@@ -93,3 +93,7 @@ class TaskListRequest(Envelope):
 
 class TaskDetailRequest(Envelope):
     external_id: str
+
+
+class TaskActionRequest(Envelope):
+    external_id: str

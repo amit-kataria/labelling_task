@@ -1,16 +1,23 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 
 from labelling_task.auth.dependencies import get_principal
 from labelling_task.auth.models import Principal
-from labelling_task.domain.entities.task import TaskCreateRequest, TaskDetailRequest, TaskListRequest
+from labelling_task.domain.entities.task import (
+    TaskCreateRequest,
+    TaskDetailRequest,
+    TaskListRequest,
+    TaskActionRequest,
+)
 from labelling_task.services.task_service import TaskService
 from labelling_task.utils.response import success
 from labelling_task.repositories.redis_client import redis_client
 from labelling_task.auth.security import get_current_user, require_role
 from labelling_task.configs.logging_config import get_logger
+
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/ext/task", tags=["task"])
+
 
 def get_current_sub(token_data=Depends(get_current_user)):
     # Extract sub or useful ID from token
@@ -54,7 +61,7 @@ async def create_task(
 async def list_tasks(
     request: Request,
     body: TaskListRequest,
-    token_data = Depends(get_current_user),
+    token_data=Depends(get_current_user),
 ) -> dict:
     log.info(
         "task.list.start request_id=%s tenant_id=%s user_id=%s page=%s size=%s",
@@ -68,7 +75,7 @@ async def list_tasks(
     tenant_id = token_data.get("tenantId", "")
     user_id = token_data.get("sub", "unknown")
     role = token_data.get("role", "unknown")
-    
+
     data = await svc.list_tasks(tenant_id, user_id, role, body)
     log.info(
         "task.list.done request_id=%s tenant_id=%s user_id=%s returned=%s total=%s",
@@ -85,7 +92,7 @@ async def list_tasks(
 async def task_detail(
     request: Request,
     body: TaskDetailRequest,
-    token_data = Depends(get_current_user),
+    token_data=Depends(get_current_user),
 ) -> dict:
     log.info(
         "task.detail.start tenant_id=%s user_id=%s external_id=%s",
@@ -106,3 +113,106 @@ async def task_detail(
         body.external_id,
     )
     return success(data, message="Request successful")
+
+
+@router.put("/perform/park_task")
+async def park_task(
+    request: Request,
+    body: TaskActionRequest,
+    token_data=Depends(require_role("Role_Annotator")),
+) -> dict:
+    log.info(
+        "task.park.start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+        body.request_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
+        body.external_id,
+    )
+    tenant_id = token_data.get("tenantId", "")
+    user_id = token_data.get("sub", "unknown")
+    svc = _service(request)
+
+    data = await svc.update_task_status(tenant_id, user_id, body, "task_parked")
+    log.info("task.park.done external_id=%s", body.external_id)
+    return success(data, message="Task parked successfully")
+
+
+@router.put("/perform/ANNOTATIONS_SAVE")
+async def unpark_task(
+    request: Request,
+    body: TaskActionRequest,
+    token_data=Depends(require_role("Role_Annotator")),
+) -> dict:
+    log.info(
+        "task.unpark.start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+        body.request_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
+        body.external_id,
+    )
+    tenant_id = token_data.get("tenantId", "")
+    user_id = token_data.get("sub", "unknown")
+    svc = _service(request)
+
+    data = await svc.update_task_status(tenant_id, user_id, body, "ANNOTATIONS_SAVE")
+    log.info("task.unpark.done external_id=%s", body.external_id)
+    return success(data, message="Task unparked successfully")
+
+
+@router.put("/perform/assign_task_annotator")
+async def reject_task(
+    request: Request,
+    body: TaskActionRequest,
+    token_data=Depends(require_role("Role_Reviewer")),
+) -> dict:
+    log.info(
+        "task.reject.start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+        body.request_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
+        body.external_id,
+    )
+    tenant_id = token_data.get("tenantId", "")
+    user_id = token_data.get("sub", "unknown")
+    svc = _service(request)
+
+    data = await svc.update_task_status(tenant_id, user_id, body, "assign_task_annotator")
+    log.info("task.reject.done external_id=%s", body.external_id)
+    return success(data, message="Task rejected and reassigned to annotator")
+
+
+@router.put("/perform/assign_task_reviewer")
+async def submit_or_accept_task(
+    request: Request,
+    body: TaskActionRequest,
+    token_data=Depends(get_current_user),
+) -> dict:
+    log.info(
+        "task.assign_reviewer.start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+        body.request_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
+        body.external_id,
+    )
+    tenant_id = token_data.get("tenantId", "")
+    user_id = token_data.get("sub", "unknown")
+    roles = token_data.get("roles", [])
+    svc = _service(request)
+
+    target_status = None
+    if "Role_Annotator" in roles:
+        target_status = "assign_task_reviewer"
+    elif "Role_Reviewer" in roles:
+        target_status = "accept_annotation"
+
+    if not target_status:
+        log.warning("task.assign_reviewer.forbidden user_id=%s roles=%s", user_id, roles)
+        raise HTTPException(status_code=403, detail="Insufficient privileges")
+
+    data = await svc.update_task_status(tenant_id, user_id, body, target_status)
+    log.info(
+        "task.assign_reviewer.done external_id=%s target_status=%s",
+        body.external_id,
+        target_status,
+    )
+    return success(data, message=f"Task moved to {target_status}")
