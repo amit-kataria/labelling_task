@@ -89,7 +89,7 @@ class TaskRepository:
         limit: int,
         sort: list[tuple[str, int]],
     ) -> tuple[list[dict[str, Any]], int]:
-        q = {"tenant_id": tenant_id, "deleted_at": None, **query}
+        q = query
         log.info(
             "repo.task.list tenant_id=%s skip=%s limit=%s sort=%s query_keys=%s",
             tenant_id,

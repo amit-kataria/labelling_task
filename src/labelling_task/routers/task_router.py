@@ -1,9 +1,11 @@
+from typing import Union
 from fastapi import APIRouter, Depends, Request, HTTPException
 
 from labelling_task.domain.entities.task import (
     TaskCreateRequest,
     TaskDetailRequest,
     TaskListRequest,
+    TaskListRequest2,
     TaskActionRequest,
     TaskUpdateRequest,
 )
@@ -25,7 +27,10 @@ def get_current_sub(token_data=Depends(get_current_user)):
 
 def _service(request: Request) -> TaskService:
     repo = request.app.state.task_repo
-    return TaskService(repo=repo, redis_client=redis_client.client)
+    allocation_service = request.app.state.allocation_service
+    return TaskService(
+        repo=repo, redis_client=redis_client.client, allocation_service=allocation_service
+    )
 
 
 @router.post("/create")
@@ -96,7 +101,7 @@ async def save_annotations(
 @router.post("/list")
 async def list_tasks(
     request: Request,
-    body: TaskListRequest,
+    body: TaskListRequest2,
     token_data=Depends(get_current_user),
 ) -> dict:
     log.info(
@@ -110,7 +115,7 @@ async def list_tasks(
     svc = _service(request)
     tenant_id = token_data.get("tenantId", "")
     user_id = token_data.get("sub", "unknown")
-    role = token_data.get("role", "unknown")
+    role = token_data.get("roles", "unknown")
 
     data = await svc.list_tasks(tenant_id, user_id, role, body)
     log.info(

@@ -1,3 +1,4 @@
+from ast import operator
 import json
 from datetime import datetime, timezone
 from math import ceil
@@ -11,7 +12,9 @@ from labelling_task.domain.entities.task import (
     TaskCreateRequest,
     TaskDetailRequest,
     TaskListRequest,
-    SortSpec,
+    TaskListRequest2,
+    FilterCondition,
+    SortCriterion,
     TaskActionRequest,
     TaskUpdateRequest,
     AnnotationItem,
@@ -27,6 +30,15 @@ from labelling_task.configs.logging_config import get_logger
 log = get_logger(__name__)
 
 
+def is_admin(role: Union[str, List[str]]) -> bool:
+    admins = {"Admin", "Super Admin", "SuperAdmin"}
+    if isinstance(role, str):
+        return role in admins
+    if isinstance(role, list):
+        return any(r in admins for r in role)
+    return False
+
+
 def _mongo_op(clause: FilterClause) -> dict[str, Any]:
     op = clause.operator
     val = clause.value
@@ -34,12 +46,18 @@ def _mongo_op(clause: FilterClause) -> dict[str, Any]:
         return val
     if op == "ne":
         return {"$ne": val}
+    if op == "gt":
+        return {"$gt": val}
     if op == "gte":
         return {"$gte": val}
+    if op == "lt":
+        return {"$lt": val}
     if op == "lte":
         return {"$lte": val}
     if op == "in":
         return {"$in": val if isinstance(val, list) else [val]}
+    if op == "nin":
+        return {"$nin": val if isinstance(val, list) else [val]}
     if op == "regex":
         return {"$regex": val}
     return val
@@ -72,8 +90,57 @@ def build_query(filters: dict[str, FilterClause]) -> dict[str, Any]:
             field = "updated_on"
             value = _parse_datetime(value)
         q[field] = _mongo_op(FilterClause(operator=clause.operator, value=value))
-        log.debug(f"built_query: {q}")
     return q
+
+
+def build_dynamic_query(condition: FilterCondition) -> dict[str, Any]:
+    if not condition:
+        return {}
+
+    # Logical group: AND / OR
+    log.debug(f"building dynamic query {condition}")
+    if condition.logic:
+        logic = condition.logic.upper()
+        sub_queries = [build_dynamic_query(c) for c in (condition.conditions or [])]
+        if logic == "AND":
+            return {"$and": sub_queries} if sub_queries else {}
+        elif logic == "OR":
+            return {"$or": sub_queries} if sub_queries else {}
+        else:
+            raise ValueError(f"Unknown logic: {condition.logic}")
+
+    # Leaf node: actual field comparison
+    field = condition.field
+    op = condition.operator or "eq"
+    value = condition.value
+
+    if field in {"created_on", "created_at"}:
+        field = "created_on"
+        value = _parse_datetime(value)
+    if field in {"updated_on", "updated_at"}:
+        field = "updated_on"
+        value = _parse_datetime(value)
+
+    if op == "eq":
+        return {field: value}
+    elif op == "ne":
+        return {field: {"$ne": value}}
+    elif op == "gt":
+        return {field: {"$gt": value}}
+    elif op == "gte":
+        return {field: {"$gte": value}}
+    elif op == "lt":
+        return {field: {"$lt": value}}
+    elif op == "lte":
+        return {field: {"$lte": value}}
+    elif op == "in":
+        return {field: {"$in": value if isinstance(value, list) else [value]}}
+    elif op == "nin":
+        return {field: {"$nin": value if isinstance(value, list) else [value]}}
+    elif op == "regex":
+        return {field: {"$regex": value}}
+    else:
+        raise ValueError(f"Unsupported operator: {op}")
 
 
 def build_projection(fields: Optional[List[str]]) -> Optional[Dict[str, int]]:
@@ -85,8 +152,8 @@ def build_projection(fields: Optional[List[str]]) -> Optional[Dict[str, int]]:
     proj["tenant_id"] = 1
     proj["org"] = 1
     proj["status"] = 1
-    proj["created_at"] = 1
-    proj["updated_at"] = 1
+    proj["created_on"] = 1
+    proj["updated_on"] = 1
     proj["allocated_to"] = 1
     proj["owner"] = 1
     proj["task_details"] = 1
@@ -95,22 +162,24 @@ def build_projection(fields: Optional[List[str]]) -> Optional[Dict[str, int]]:
     return proj
 
 
-def build_sort(sort_spec: Union[List[SortSpec], List[Dict[str, str]]]) -> List[Tuple[str, int]]:
+def build_sort(
+    sort_spec: Union[List[SortCriterion], List[Dict[str, str]]],
+) -> List[Tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for s in sort_spec or []:
-        if isinstance(s, SortSpec):
+        if isinstance(s, SortCriterion):
             field = s.field
             direction = s.direction.lower()
         else:
             field = s.get("field")
             direction = s.get("direction", "asc").lower()
         if field in {"created_on", "created_at"}:
-            field = "created_at"
+            field = "created_on"
         if field in {"updated_on", "updated_at"}:
-            field = "updated_at"
+            field = "updated_on"
         out.append((field, 1 if direction == "asc" else -1))
     if not out:
-        out = [("created_at", -1)]
+        out = [("created_on", -1)]
     return out
 
 
@@ -242,7 +311,7 @@ class TaskService:
             user_id,
             req.external_id,
         )
-        if role not in {"Admin", "Super Admin", "SuperAdmin"}:
+        if not is_admin(role):
             raise ForbiddenError("only admin can create tasks")
 
         now = datetime.now(timezone.utc)
@@ -256,9 +325,9 @@ class TaskService:
             "task_details": req.task_details.model_dump(),
             "created_by": user_id,
             "updated_by": user_id,
-            "created_at": now,
-            "updated_at": now,
-            "deleted_at": None,
+            "created_on": now,
+            "updated_on": now,
+            "deleted_on": None,
         }
 
         _id = await self._repo.insert(doc)
@@ -347,7 +416,7 @@ class TaskService:
         return out
 
     async def list_tasks(
-        self, tenant_id: str, user_id: str, role: str, req: TaskListRequest
+        self, tenant_id: str, user_id: str, role: str, req: TaskListRequest2
     ) -> dict[str, Any]:
         log.info(
             "svc.task.list start request_id=%s tenant_id=%s user_id=%s role=%s",
@@ -356,25 +425,33 @@ class TaskService:
             user_id,
             role,
         )
-        query = build_query(req.filters)
+        tenant = FilterCondition(field="tenant_id", operator="eq", value=tenant_id)
+        deleted_at = FilterCondition(field="deleted_at", operator="eq", value=None)
+        if not is_admin(role):
+            allocated_to = FilterCondition(field="allocated_to", operator="eq", value=user_id)
+            req.filters.conditions.append(allocated_to)
 
-        # Non-admins can only see their own tasks.
-        if role not in {"Admin", "Super Admin", "SuperAdmin"}:
-            query["allocated_to"] = user_id
+        req.filters.conditions.append(tenant)
+        req.filters.conditions.append(deleted_at)
+        log.info(f"processing request {req}")
+        query = build_dynamic_query(req.filters) if req.filters else {}
+        log.debug(f"created query {query}")
 
         projection = build_projection(req.fields)
         sort = build_sort(req.sort)
-        skip = max(req.page, 0) * max(req.size, 1)
-        limit = max(min(req.size, 100), 1)
+        page = req.page or 0
+        size = req.size or 10
+        skip = max(page, 0) * max(size, 1)
+        limit = max(min(size, 100), 1)
 
         log.info(
-            "svc.task.list query request_id=%s tenant_id=%s skip=%s limit=%s sort=%s query_keys=%s",
+            "svc.task.list query request_id=%s tenant_id=%s skip=%s limit=%s sort=%s query=%s",
             req.request_id,
             tenant_id,
             skip,
             limit,
             sort,
-            sorted(list(query.keys())),
+            query,
         )
         items, total = await self._repo.list(
             tenant_id=tenant_id,
@@ -388,10 +465,10 @@ class TaskService:
         tasks_out: list[dict[str, Any]] = []
         for it in items:
             it = oid_to_str(it)
-            it["created_on"] = dt_to_iso(it.get("created_at"))
-            it["updated_on"] = dt_to_iso(it.get("updated_at"))
-            it.pop("created_at", None)
-            it.pop("updated_at", None)
+            it["created_on"] = dt_to_iso(it.get("created_on"))
+            it["updated_on"] = dt_to_iso(it.get("updated_on"))
+            it.pop("created_on", None)
+            it.pop("updated_on", None)
             it.pop("tenant_id", None)  # never leak tenant ids in payloads
             tasks_out.append(it)
 
@@ -424,17 +501,14 @@ class TaskService:
         doc = await self._repo.get_by_external_id(tenant_id=tenant_id, external_id=req.external_id)
 
         # Non-admins: only tasks allocated to them
-        if (
-            role not in {"Admin", "Super Admin", "SuperAdmin"}
-            and doc.get("allocated_to") != user_id
-        ):
+        if not is_admin(role) and doc.get("allocated_to") != user_id:
             raise ForbiddenError("forbidden")
 
         doc = oid_to_str(doc)
-        doc["created_on"] = dt_to_iso(doc.get("created_at"))
-        doc["updated_on"] = dt_to_iso(doc.get("updated_at"))
-        doc.pop("created_at", None)
-        doc.pop("updated_at", None)
+        doc["created_on"] = dt_to_iso(doc.get("created_on"))
+        doc["updated_on"] = dt_to_iso(doc.get("updated_on"))
+        doc.pop("created_on", None)
+        doc.pop("updated_on", None)
         doc.pop("tenant_id", None)
         log.info(
             "svc.task.detail done request_id=%s tenant_id=%s external_id=%s",
@@ -489,7 +563,7 @@ class TaskService:
         updates = {
             "task_details": merged_task_details,
             "updated_by": user_id,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_on": datetime.now(timezone.utc),
             "status": "ANNOTATIONS_SAVE",  # As per Java code
         }
 
@@ -520,10 +594,10 @@ class TaskService:
 
         # Return formatted doc
         updated_doc = oid_to_str(updated_doc)
-        updated_doc["created_on"] = dt_to_iso(updated_doc.get("created_at"))
-        updated_doc["updated_on"] = dt_to_iso(updated_doc.get("updated_at"))
-        updated_doc.pop("created_at", None)
-        updated_doc.pop("updated_at", None)
+        updated_doc["created_on"] = dt_to_iso(updated_doc.get("created_on"))
+        updated_doc["updated_on"] = dt_to_iso(updated_doc.get("updated_on"))
+        updated_doc.pop("created_on", None)
+        updated_doc.pop("updated_on", None)
         updated_doc.pop("tenant_id", None)
         return updated_doc
 
@@ -572,9 +646,9 @@ class TaskService:
         )
 
         doc = oid_to_str(doc)
-        doc["created_on"] = dt_to_iso(doc.get("created_at"))
-        doc["updated_on"] = dt_to_iso(doc.get("updated_at"))
-        doc.pop("created_at", None)
-        doc.pop("updated_at", None)
+        doc["created_on"] = dt_to_iso(doc.get("created_on"))
+        doc["updated_on"] = dt_to_iso(doc.get("updated_on"))
+        doc.pop("created_on", None)
+        doc.pop("updated_on", None)
         doc.pop("tenant_id", None)
         return doc

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AnnotationItem(BaseModel):
@@ -79,21 +79,72 @@ class TaskCreateRequest(Envelope):
 
 
 class FilterClause(BaseModel):
-    operator: Literal["eq", "ne", "gte", "lte", "in", "regex"]
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "in", "nin", "regex"]
     value: Any
 
 
-class SortSpec(BaseModel):
+class FilterCondition(BaseModel):
+    logic: Optional[Literal["AND", "OR"]] = None
+    field: Optional[str] = None
+    operator: Optional[Literal["eq", "ne", "gt", "gte", "lt", "lte", "in", "nin", "regex"]] = None
+    value: Optional[Any] = None
+    conditions: Optional[List[FilterCondition]] = None
+
+    @field_validator("logic", mode="before")
+    @classmethod
+    def normalize_logic(cls, v):
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
+
+class SortCriterion(BaseModel):
     field: str
     direction: Literal["asc", "desc"] = "asc"
 
+    @field_validator("direction", mode="before")
+    @classmethod
+    def normalize_direction(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
 
 class TaskListRequest(Envelope):
+    """Deprecated: using TaskListRequest2 instead"""
+
     filters: dict[str, FilterClause] = Field(default_factory=dict)
     fields: list[str] | None = None
     page: int = 0
     size: int = 10
-    sort: list[SortSpec] = Field(default_factory=list)
+    sort: list[SortCriterion] = Field(default_factory=list)
+
+
+class TaskListRequest2(Envelope):
+    filters: Optional[FilterCondition] = None
+    sort: Optional[List[SortCriterion]] = None
+    page: Optional[int] = 0
+    size: Optional[int] = 10
+    fields: Optional[List[str]] = None
+
+    @field_validator("filters", mode="before")
+    @classmethod
+    def transform_filters(cls, v):
+        if isinstance(v, dict) and "logic" not in v and "field" not in v:
+            # It's likely the old map format: { "field": { "operator": "...", "value": "..." } }
+            conditions = []
+            for field, clause in v.items():
+                if isinstance(clause, dict) and "operator" in clause:
+                    conditions.append(
+                        FilterCondition(
+                            field=field,
+                            operator=clause.get("operator"),
+                            value=clause.get("value"),
+                        )
+                    )
+            if conditions:
+                return FilterCondition(logic="AND", conditions=conditions)
+        return v
 
 
 class TaskDetailRequest(Envelope):
