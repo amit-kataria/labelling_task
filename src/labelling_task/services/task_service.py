@@ -31,7 +31,8 @@ log = get_logger(__name__)
 
 
 def is_admin(role: Union[str, List[str]]) -> bool:
-    admins = {"Admin", "Super Admin", "SuperAdmin"}
+    log.debug("checking role: %s", role)
+    admins = {"Role_Admin", "Role_SuperAdmin"}
     if isinstance(role, str):
         return role in admins
     if isinstance(role, list):
@@ -302,7 +303,7 @@ class TaskService:
         self._allocation_service = allocation_service
 
     async def create_task(
-        self, tenant_id: str, user_id: str, role: str, req: TaskCreateRequest
+        self, tenant_id: str, user_id: str, roles: list[str], req: TaskCreateRequest
     ) -> dict[str, Any]:
         log.info(
             "svc.task.create start request_id=%s tenant_id=%s user_id=%s external_id=%s",
@@ -311,8 +312,6 @@ class TaskService:
             user_id,
             req.external_id,
         )
-        if not is_admin(role):
-            raise ForbiddenError("only admin can create tasks")
 
         now = datetime.now(timezone.utc)
         doc: dict[str, Any] = {
@@ -362,32 +361,11 @@ class TaskService:
             },
         )
 
-        # Cache static-ish details (instructions/labels) for quick UI access.
-        cache_key = f"lt:taskmeta:{tenant_id}:{req.external_id}"
-        log.info(
-            "svc.task.create cache_set key=%s request_id=%s tenant_id=%s external_id=%s",
-            cache_key,
-            req.request_id,
-            tenant_id,
-            req.external_id,
-        )
-        await self._redis.setex(
-            cache_key,
-            3600,
-            json.dumps(
-                {
-                    "external_id": req.external_id,
-                    "instructions": req.task_details.instructions,
-                    "labels": [l.model_dump() for l in req.task_details.labels],
-                }
-            ),
-        )
-
         asyncio.create_task(
             self._allocation_service.allocate(
                 AllocationRequest(
                     tenant_id=tenant_id,
-                    role="Role_Annotator",
+                    role=roles[0],
                     task_id=req.external_id,
                     assignment=req.task_details.task_assignment_type,
                     workflow=req.task_details.workflow_type,

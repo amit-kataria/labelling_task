@@ -37,7 +37,7 @@ def _service(request: Request) -> TaskService:
 async def create_task(
     request: Request,
     body: TaskCreateRequest,
-    token_data=Depends(get_current_user),
+    token_data=Depends(require_role("Role_Admin")),
 ) -> dict:
     log.info(
         "task.create.start request_id=%s tenant_id=%s user_id=%s external_id=%s org=%s",
@@ -51,8 +51,8 @@ async def create_task(
     data = await svc.create_task(
         tenant_id=token_data.get("tenantId", ""),
         user_id=token_data.get("sub", "unknown"),
-        role=token_data.get("role", "unknown"),
-        body=body,
+        roles=token_data.get("roles", "unknown"),
+        req=body,
     )
     log.info(
         "task.create.done request_id=%s tenant_id=%s user_id=%s external_id=%s task_id=%s",
