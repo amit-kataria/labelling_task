@@ -6,18 +6,25 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class LabelDefinition(BaseModel):
+class AnnotationItem(BaseModel):
+    _id: str | None = None
+    start: int
+    end: int
+    section: str
     label: str
+    pageNumber: int
+    paragraphNo: int
+    value: str
     description: str | None = None
     color: str | None = None
 
 
-class AnnotationItem(BaseModel):
-    # For PDFs; for other media types you will extend this schema (e.g., time ranges, bounding boxes).
-    page_number: int | None = None
-    paragraph_no: int | None = None
-    word: str | None = None
-    tags: list[str] = Field(default_factory=list)
+class CommentItem(BaseModel):
+    _id: str | None = None
+    text: str
+    author: str | None = None
+    timestamp: datetime | None = None
+    pageNumber: str
 
 
 class TaskDetails(BaseModel):
@@ -28,12 +35,10 @@ class TaskDetails(BaseModel):
     workflow_type: Literal["Single Pass", "With Review", "Consencus"] | str = "Single Pass"
 
     instructions: str | None = None
-    labels: list[LabelDefinition] = Field(default_factory=list)
-
     # Per-file details / output
     file_name: str | None = None
     annotations: list[AnnotationItem] = Field(default_factory=list)
-    comments: list[dict[str, Any]] = Field(default_factory=list)
+    comments: list[CommentItem] = Field(default_factory=list)
 
 
 class Task(BaseModel):
@@ -97,3 +102,8 @@ class TaskDetailRequest(Envelope):
 
 class TaskActionRequest(Envelope):
     external_id: str
+
+
+class TaskUpdateRequest(Envelope):
+    external_id: str
+    task_details: TaskDetails

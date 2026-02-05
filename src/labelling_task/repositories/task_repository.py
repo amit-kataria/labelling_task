@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from labelling_task.configs.settings import Settings
 from labelling_task.errors import NotFoundError
 from labelling_task.configs.logging_config import get_logger
+from labelling_task.domain.entities.task import Task
 
 log = get_logger(__name__)
 
@@ -62,6 +63,22 @@ class TaskRepository:
             raise NotFoundError("task not found")
         return doc
 
+    async def get_task_by_external_id(self, tenant_id: str, external_id: str) -> Task:
+        doc = await self.get_by_external_id(tenant_id=tenant_id, external_id=external_id)
+        return Task(**doc) if doc else None
+
+    async def set_allocated_to(self, tenant_id: str, external_id: str, user_id: str):
+        log.info(
+            "repo.task.set_allocated_to tenant_id=%s external_id=%s user_id=%s",
+            tenant_id,
+            external_id,
+            user_id,
+        )
+        return await self._col.update_one(
+            {"tenant_id": tenant_id, "external_id": external_id, "deleted_at": None},
+            {"$set": {"allocated_to": user_id, "updated_at": datetime.utcnow()}},
+        )
+
     async def list(
         self,
         *,
@@ -110,6 +127,33 @@ class TaskRepository:
         if not doc:
             log.info(
                 "repo.task.update_status not_found tenant_id=%s external_id=%s",
+                tenant_id,
+                external_id,
+            )
+            raise NotFoundError("task not found")
+        return doc
+
+    async def update(
+        self,
+        *,
+        tenant_id: str,
+        external_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        log.info(
+            "repo.task.update tenant_id=%s external_id=%s keys=%s",
+            tenant_id,
+            external_id,
+            sorted(list(updates.keys())),
+        )
+        doc = await self._col.find_one_and_update(
+            {"tenant_id": tenant_id, "external_id": external_id, "deleted_at": None},
+            {"$set": updates},
+            return_document=True,
+        )
+        if not doc:
+            log.info(
+                "repo.task.update not_found tenant_id=%s external_id=%s",
                 tenant_id,
                 external_id,
             )

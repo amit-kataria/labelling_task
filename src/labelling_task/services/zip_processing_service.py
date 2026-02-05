@@ -1,3 +1,4 @@
+from labelling_task.webclient.OAuth2HttpClient import OAuth2HttpClient
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +10,6 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-import httpx
 import redis.asyncio as redis
 
 from labelling_task.configs.settings import Settings
@@ -20,7 +20,6 @@ log = logging.getLogger(__name__)
 
 class ZipProcessingService:
     """
-    Python equivalent of the Java ZipProcessingService.
 
     Responsibilities:
     - Download ZIP from upload-service (streaming) using document_id.
@@ -37,7 +36,7 @@ class ZipProcessingService:
         repo: TaskRepository,
         redis_client: redis.Redis,
         settings: Settings,
-        http_client: httpx.AsyncClient,
+        http_client: OAuth2HttpClient,
     ) -> None:
         self._repo = repo
         self._redis = redis_client
@@ -243,8 +242,14 @@ class ZipProcessingService:
                 "tenant_id": tenant_id,
                 "external_id": file_id,
                 "org": project.get("org"),
-                "assignment": (task_details.get("task_assignment_type") or project.get("task_details", {}).get("task_assignment_type")),
-                "workflow": (task_details.get("workflow_type") or project.get("task_details", {}).get("workflow_type")),
+                "assignment": (
+                    task_details.get("task_assignment_type")
+                    or project.get("task_details", {}).get("task_assignment_type")
+                ),
+                "workflow": (
+                    task_details.get("workflow_type")
+                    or project.get("task_details", {}).get("workflow_type")
+                ),
                 "data_type": task_details.get("data_type") or "",
                 "created_by": created_by,
             },
@@ -277,4 +282,3 @@ class ZipProcessingService:
             external_id,
             new_count,
         )
-

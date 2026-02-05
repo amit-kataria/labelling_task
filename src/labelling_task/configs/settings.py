@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     JWKS_CACHE_TTL: int = 300  # 5 minutes
     CLOCK_SKEW_SECONDS: int = 60  # industry standard (1 min)
 
+    # OAuth2 Client credentials for inter-service communication
+    oauth2_token_url: str = "http://localhost:5055/oauth2/token"
+    oauth2_client_id: str = "labelling-task-service"
+    oauth2_client_secret: str = "secret"
+    oauth2_scope: str = "openid profile"
+
     # ----------------------------
     # CORS
     # ----------------------------
@@ -71,13 +77,13 @@ class Settings(BaseSettings):
     # Retention
     # ----------------------------
     deleted_retention_days: int = 90
-    
+
     # ----------------------------
     # Zip worker / consumer
     # ----------------------------
     zip_consumer_group: str = "lt-zip-consumers"
     zip_consumer_name: str = "lt-zip-worker-1"
-    
+
     # Pydantic settings config (v2 style)
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -50,9 +50,7 @@ class JWKSCache:
             time.sleep(JWKS_CACHE_TTL)
 
     def start_jwks_refresh(self):
-        thread = threading.Thread(
-            target=self.refresh_forever, name="jwks-refresh", daemon=True
-        )
+        thread = threading.Thread(target=self.refresh_forever, name="jwks-refresh", daemon=True)
         thread.start()
 
 
@@ -183,13 +181,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 def require_role(required_role: str):
     def role_checker(token_data=Depends(get_current_user)):
-        log.debug(
-            f"role_checker: checking for required role {required_role} in {token_data}"
-        )
+        log.debug(f"role_checker: checking for required role {required_role} in {token_data}")
         roles = token_data.get("roles", [])
-        log.debug(f"role_checker: roles: {roles}")
+        lower_roles = [s.lower() for s in roles]
+        log.debug(f"role_checker: roles: {lower_roles}")
 
-        if required_role not in roles:
+        if required_role.lower() not in lower_roles:
             log.warning(f"Insufficient privileges for role {required_role}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient privileges"

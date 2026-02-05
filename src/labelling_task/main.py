@@ -1,14 +1,14 @@
-from __future__ import annotations
+from labelling_task.services.allocation_service import AllocationService
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from labelling_task.auth.dependencies import get_principal
 from labelling_task.configs.settings import Settings, get_settings
 from labelling_task.errors import AppError
 from labelling_task.repositories.mongo import get_mongo_client, get_mongo_db
 from labelling_task.repositories.redis_client import redis_client
 from labelling_task.repositories.task_repository import TaskRepository
+from labelling_task.repositories.allocation_repository import AllocationRepository
 from labelling_task.routers.health_router import router as health_router
 from labelling_task.routers.task_router import router as task_router
 from labelling_task.utils.response import failure
@@ -18,6 +18,9 @@ from labelling_task.services.zip_processing_service import ZipProcessingService
 import asyncio
 import time
 import httpx
+from labelling_task.webclient.OAuth2TokenProvider import OAuth2TokenProvider
+from labelling_task.webclient.OAuth2HttpClient import OAuth2HttpClient
+
 log = get_logger(__name__)
 
 
@@ -39,7 +42,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     @app.middleware("http")
     async def request_logging_middleware(request: Request, call_next):
         start = time.perf_counter()
@@ -47,7 +50,7 @@ def create_app() -> FastAPI:
         path = request.url.path
         request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id")
         tenant_id = request.headers.get("x-tenant-id")  # optional; canonical is JWT claim
-        
+
         log.info(
             "request.start method=%s path=%s request_id=%s tenant_hint=%s",
             method,
@@ -69,6 +72,7 @@ def create_app() -> FastAPI:
                 elapsed_ms,
             )
         return response
+
     app.include_router(health_router)
     app.include_router(task_router)
 
@@ -101,10 +105,25 @@ def create_app() -> FastAPI:
         # await repo.ensure_indexes()
         log.info("startup.ensure_indexes skipped")
         app.state.task_repo = repo
+        allocation_repo = AllocationRepository(mongo_db, settings)
+        # await allocation_repo.ensure_indexes()
+        app.state.allocation_repo = allocation_repo
+
+        allocation_service = AllocationService(allocation_repo, redis_client.client)
+        app.state.allocation_service = allocation_service
 
         # Set up HTTP client and ZIP processing worker
-        http_client = httpx.AsyncClient(timeout=60.0)
+        token_provider = OAuth2TokenProvider(
+            token_url=settings.oauth2_token_url,
+            client_id=settings.oauth2_client_id,
+            client_secret=settings.oauth2_client_secret,
+            scope=settings.oauth2_scope,
+        )
+        # We can pass an existing httpx client if we want to share it/config it
+        httpx_client = httpx.AsyncClient(timeout=60.0)
+        http_client = OAuth2HttpClient(token_provider=token_provider, client=httpx_client)
         app.state.http_client = http_client
+
         zip_service = ZipProcessingService(
             repo=repo,
             redis_client=redis_client.client,
@@ -187,7 +206,7 @@ def create_app() -> FastAPI:
             worker.cancel()
         http_client = getattr(app.state, "http_client", None)
         if http_client is not None:
-            await http_client.aclose()
+            await http_client.session.aclose()
         mongo_client = getattr(app.state, "mongo_client", None)
         if mongo_client is not None:
             mongo_client.close()

@@ -1,13 +1,11 @@
-from __future__ import annotations
-
 import json
 from datetime import datetime, timezone
 from math import ceil
-from typing import Any
-
+from typing import Any, List
+import uuid
+import asyncio
 import redis.asyncio as redis
 
-from labelling_task.auth.models import Principal
 from labelling_task.domain.entities.task import (
     FilterClause,
     TaskCreateRequest,
@@ -15,8 +13,13 @@ from labelling_task.domain.entities.task import (
     TaskListRequest,
     SortSpec,
     TaskActionRequest,
+    TaskUpdateRequest,
+    AnnotationItem,
+    CommentItem,
 )
+from labelling_task.domain.entities.allocation_request import AllocationRequest
 from labelling_task.errors import ForbiddenError
+from labelling_task.services.allocation_service import AllocationService
 from labelling_task.configs.settings import get_settings
 from labelling_task.repositories.task_repository import TaskRepository, dt_to_iso, oid_to_str
 from labelling_task.configs.logging_config import get_logger
@@ -111,33 +114,148 @@ def build_sort(sort_spec: list[SortSpec] | list[dict[str, str]]) -> list[tuple[s
     return out
 
 
+def merge_annotations(
+    existing_details: list[AnnotationItem], new_details: list[AnnotationItem]
+) -> list[AnnotationItem]:
+    """
+    Merge annotations from new_details into existing_details.
+
+    Rules:
+    1. If new annotation has _id=None, it's a new element - add it
+    2. If new annotation has _id but doesn't exist in existing, it's deleted - skip it
+    3. If new annotation has _id and exists in existing, update it
+    """
+    annotation_map: dict[str, AnnotationItem] = {}
+
+    # Build map of existing annotations
+    for a in existing_details or []:
+        if a._id:
+            annotation_map[a._id] = a
+
+    existing_ids = set(annotation_map.keys())
+    final_annotations = []
+
+    for a in new_details:
+        if a._id is None:
+            # New annotation - generate ID and add
+            a._id = str(uuid.uuid4())
+            final_annotations.append(a)
+            log.info(
+                f"New annotation added: {a._id} (label={a.label}, start={a.start}, end={a.end})"
+            )
+        elif a._id in existing_ids:
+            # Existing annotation - update
+            final_annotations.append(a)
+        else:
+            # Has ID but not in existing - it was deleted, skip
+            log.info(f"Annotation deleted: {a._id} (label={a.label})")
+
+    return final_annotations
+
+
+def merge_comments(
+    existing_comments: List[CommentItem],
+    new_comments: List[CommentItem],
+    user_id: str | None = None,
+) -> List[CommentItem]:
+    """
+    Merge comments from new_comments into existing_comments.
+
+    Rules:
+    1. If new comment has _id=None, it's a new comment - add with generated ID and timestamp
+    2. If existing comment is not in new_comments, it's deleted - exclude from final list
+    3. If new comment has _id matching existing, it's an update
+
+    Returns:
+        List of merged CommentItem objects
+    """
+    # Build map of existing comments by ID
+    existing_map: dict[str, CommentItem] = {}
+    for comment in existing_comments or []:
+        if comment._id:
+            existing_map[comment._id] = comment
+
+    # Track which existing IDs are still present
+    existing_ids_in_new = set()
+    final_comments: List[CommentItem] = []
+    now = datetime.now(timezone.utc)
+
+    for comment in new_comments or []:
+        if comment._id is None:
+            # New comment - generate ID and set defaults
+            comment._id = str(uuid.uuid4())
+            if not comment.author:
+                comment.author = user_id
+            if not comment.timestamp:
+                comment.timestamp = now
+
+            log.info(
+                f"New comment added: id={comment._id}, author={comment.author}, "
+                f"page={comment.pageNumber}, text='{comment.text[:50]}...'"
+            )
+            final_comments.append(comment)
+        else:
+            # Has _id - check if it exists in existing comments
+            if comment._id in existing_map:
+                # Update existing comment - preserve original values if not provided
+                existing_comment = existing_map[comment._id]
+                if not comment.author:
+                    comment.author = existing_comment.author or user_id
+                if not comment.timestamp:
+                    comment.timestamp = existing_comment.timestamp or now
+
+                existing_ids_in_new.add(comment._id)
+                final_comments.append(comment)
+            else:
+                # Has ID but not in existing - should not happen, treat as deleted
+                log.warning(
+                    f"Comment with ID {comment._id} not found in existing comments - skipping"
+                )
+
+    # Log deleted comments (existing but not in new)
+    deleted_ids = set(existing_map.keys()) - existing_ids_in_new
+    for deleted_id in deleted_ids:
+        deleted_comment = existing_map[deleted_id]
+        log.info(
+            f"Comment deleted: id={deleted_id}, author={deleted_comment.author}, "
+            f"page={deleted_comment.pageNumber}, text='{deleted_comment.text[:50]}...'"
+        )
+
+    return final_comments
+
+
 class TaskService:
-    def __init__(self, repo: TaskRepository, redis_client: redis.Redis):
+    def __init__(
+        self, repo: TaskRepository, redis_client: redis.Redis, allocation_service: AllocationService
+    ):
         self._repo = repo
         self._redis = redis_client
+        self._allocation_service = allocation_service
 
-    async def create_task(self, principal: Principal, req: TaskCreateRequest) -> dict[str, Any]:
+    async def create_task(
+        self, tenant_id: str, user_id: str, role: str, req: TaskCreateRequest
+    ) -> dict[str, Any]:
         log.info(
             "svc.task.create start request_id=%s tenant_id=%s user_id=%s external_id=%s",
             req.request_id,
-            principal.tenant_id,
-            principal.user_id,
+            tenant_id,
+            user_id,
             req.external_id,
         )
-        if principal.role not in {"Admin", "Super Admin", "SuperAdmin"}:
+        if role not in {"Admin", "Super Admin", "SuperAdmin"}:
             raise ForbiddenError("only admin can create tasks")
 
         now = datetime.now(timezone.utc)
         doc: dict[str, Any] = {
             "external_id": req.external_id,
-            "tenant_id": principal.tenant_id,
+            "tenant_id": tenant_id,
             "org": req.org,
             "status": req.status,
-            "owner": principal.user_id,
+            "owner": user_id,
             "allocated_to": None,
             "task_details": req.task_details.model_dump(),
-            "created_by": principal.user_id,
-            "updated_by": principal.user_id,
+            "created_by": user_id,
+            "updated_by": user_id,
             "created_at": now,
             "updated_at": now,
             "deleted_at": None,
@@ -147,7 +265,7 @@ class TaskService:
         log.info(
             "svc.task.create inserted request_id=%s tenant_id=%s external_id=%s id=%s",
             req.request_id,
-            principal.tenant_id,
+            tenant_id,
             req.external_id,
             _id,
         )
@@ -158,30 +276,30 @@ class TaskService:
             "svc.task.create enqueue stream=%s request_id=%s tenant_id=%s external_id=%s",
             settings.redis_stream_tasks,
             req.request_id,
-            principal.tenant_id,
+            tenant_id,
             req.external_id,
         )
         await self._redis.xadd(
             settings.redis_stream_tasks,
             {
                 "event": "TASK_CREATED",
-                "tenant_id": principal.tenant_id,
+                "tenant_id": tenant_id,
                 "external_id": req.external_id,
                 "org": req.org,
                 "assignment": req.task_details.task_assignment_type,
                 "workflow": req.task_details.workflow_type,
                 "data_type": req.task_details.data_type,
-                "created_by": principal.user_id,
+                "created_by": user_id,
             },
         )
 
         # Cache static-ish details (instructions/labels) for quick UI access.
-        cache_key = f"lt:taskmeta:{principal.tenant_id}:{req.external_id}"
+        cache_key = f"lt:taskmeta:{tenant_id}:{req.external_id}"
         log.info(
             "svc.task.create cache_set key=%s request_id=%s tenant_id=%s external_id=%s",
             cache_key,
             req.request_id,
-            principal.tenant_id,
+            tenant_id,
             req.external_id,
         )
         await self._redis.setex(
@@ -196,13 +314,26 @@ class TaskService:
             ),
         )
 
+        asyncio.create_task(
+            self._allocation_service.allocate(
+                AllocationRequest(
+                    tenant_id=tenant_id,
+                    role="Role_Annotator",
+                    task_id=req.external_id,
+                    assignment=req.task_details.task_assignment_type,
+                    workflow=req.task_details.workflow_type,
+                    data_type=req.task_details.data_type,
+                )
+            )
+        )
+
         out = {
             "id": _id,
             "external_id": req.external_id,
             "org": req.org,
             "status": req.status,
-            "updated_by": principal.user_id,
-            "created_by": principal.user_id,
+            "updated_by": user_id,
+            "created_by": user_id,
             "created_on": dt_to_iso(now),
             "updated_on": dt_to_iso(now),
             "task_details": req.task_details.model_dump(),
@@ -210,7 +341,7 @@ class TaskService:
         log.info(
             "svc.task.create done request_id=%s tenant_id=%s external_id=%s",
             req.request_id,
-            principal.tenant_id,
+            tenant_id,
             req.external_id,
         )
         return out
@@ -313,6 +444,89 @@ class TaskService:
         )
         return doc
 
+    async def update_task(
+        self,
+        tenant_id: str,
+        user_id: str,
+        req: TaskUpdateRequest,
+    ) -> dict[str, Any]:
+        log.info(
+            "svc.task.update start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+            req.request_id,
+            tenant_id,
+            user_id,
+            req.external_id,
+        )
+
+        # 1. Fetch existing task
+        task = await self._repo.get_task_by_external_id(
+            tenant_id=tenant_id, external_id=req.external_id
+        )
+
+        # 2. Merge annotations and comments
+        # We follow the logic from SaveAnnotationAction.java
+
+        existing_details = task.task_details
+        new_details = req.task_details
+
+        # Merge Annotations (by ID)
+        annotation_map = merge_annotations(existing_details.annotations, new_details.annotations)
+
+        # Merge Comments (by ID)
+        comment_map = merge_comments(existing_details.comments, new_details.comments, user_id)
+
+        # Prepare final task_details
+        merged_task_details = existing_details.model_copy()
+        merged_task_details.annotations = annotation_map
+        merged_task_details.comments = comment_map
+
+        # Also update basic fields if sent in request
+        for key in ["project_name", "project_desc", "instructions", "labels"]:
+            if new_details.get(key):
+                merged_task_details[key] = new_details[key]
+
+        # 3. Save to repository
+        updates = {
+            "task_details": merged_task_details,
+            "updated_by": user_id,
+            "updated_at": datetime.now(timezone.utc),
+            "status": "ANNOTATIONS_SAVE",  # As per Java code
+        }
+
+        updated_doc = await self._repo.update(
+            tenant_id=tenant_id, external_id=req.external_id, updates=updates
+        )
+
+        log.info(
+            "svc.task.update success request_id=%s tenant_id=%s user_id=%s external_id=%s",
+            req.request_id,
+            tenant_id,
+            user_id,
+            req.external_id,
+        )
+
+        # 4. Enqueue event
+        settings = get_settings()
+        await self._redis.xadd(
+            settings.redis_stream_tasks,
+            {
+                "event": "TASK_UPDATED",
+                "tenant_id": tenant_id,
+                "external_id": req.external_id,
+                "updated_by": user_id,
+                "request_id": req.request_id or "",
+            },
+        )
+
+        # Return formatted doc
+        updated_doc = oid_to_str(updated_doc)
+        updated_doc["created_on"] = dt_to_iso(updated_doc.get("created_at"))
+        updated_doc["updated_on"] = dt_to_iso(updated_doc.get("updated_at"))
+        updated_doc.pop("created_at", None)
+        updated_doc.pop("updated_at", None)
+        updated_doc.pop("tenant_id", None)
+        return updated_doc
+
     async def update_task_status(
         self,
         tenant_id: str,
@@ -364,4 +578,3 @@ class TaskService:
         doc.pop("updated_at", None)
         doc.pop("tenant_id", None)
         return doc
-Line 368:

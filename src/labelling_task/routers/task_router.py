@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, Request, HTTPException
 
-from labelling_task.auth.dependencies import get_principal
-from labelling_task.auth.models import Principal
 from labelling_task.domain.entities.task import (
     TaskCreateRequest,
     TaskDetailRequest,
     TaskListRequest,
     TaskActionRequest,
+    TaskUpdateRequest,
 )
 from labelling_task.services.task_service import TaskService
 from labelling_task.utils.response import success
@@ -33,27 +32,64 @@ def _service(request: Request) -> TaskService:
 async def create_task(
     request: Request,
     body: TaskCreateRequest,
-    principal: Principal = Depends(get_principal),
+    token_data=Depends(get_current_user),
 ) -> dict:
     log.info(
         "task.create.start request_id=%s tenant_id=%s user_id=%s external_id=%s org=%s",
         body.request_id,
-        principal.tenant_id,
-        principal.user_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
         body.external_id,
         body.org,
     )
     svc = _service(request)
-    data = await svc.create_task(principal, body)
+    data = await svc.create_task(
+        tenant_id=token_data.get("tenantId", ""),
+        user_id=token_data.get("sub", "unknown"),
+        role=token_data.get("role", "unknown"),
+        body=body,
+    )
     log.info(
         "task.create.done request_id=%s tenant_id=%s user_id=%s external_id=%s task_id=%s",
         body.request_id,
-        principal.tenant_id,
-        principal.user_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
         body.external_id,
         data.get("id"),
     )
     return success(data)
+
+
+@router.put("/perform/save_annotations")
+async def save_annotations(
+    request: Request,
+    body: TaskUpdateRequest,
+    token_data=Depends(get_current_user),
+) -> dict:
+    log.info(
+        "task.save_annotations.start request_id=%s tenant_id=%s user_id=%s external_id=%s",
+        body.request_id,
+        token_data.get("tenantId", ""),
+        token_data.get("sub", "unknown"),
+        body.external_id,
+    )
+    tenant_id = token_data.get("tenantId", "")
+    user_id = token_data.get("sub", "unknown")
+    svc = _service(request)
+    data = await svc.update_task(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role=token_data.get("role", "unknown"),
+        body=body,
+    )
+    log.info(
+        "task.save_annotations.done request_id=%s tenant_id=%s user_id=%s external_id=%s",
+        body.request_id,
+        tenant_id,
+        user_id,
+        body.external_id,
+    )
+    return success(data, message="Task updated successfully")
 
 
 @router.post("/v2/list")
@@ -89,7 +125,7 @@ async def list_tasks(
 
 
 @router.post("/detail")
-async def task_detail(
+async def get_task_detail(
     request: Request,
     body: TaskDetailRequest,
     token_data=Depends(get_current_user),
@@ -132,12 +168,12 @@ async def park_task(
     user_id = token_data.get("sub", "unknown")
     svc = _service(request)
 
-    data = await svc.update_task_status(tenant_id, user_id, body, "task_parked")
+    data = await svc.update_task_status(tenant_id, user_id, body, "PARKED")
     log.info("task.park.done external_id=%s", body.external_id)
     return success(data, message="Task parked successfully")
 
 
-@router.put("/perform/ANNOTATIONS_SAVE")
+@router.put("/perform/unpark_task")
 async def unpark_task(
     request: Request,
     body: TaskActionRequest,
