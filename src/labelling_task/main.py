@@ -100,18 +100,6 @@ def create_app() -> FastAPI:
         app.state.mongo_db = mongo_db
         app.state.redis = redis_client.client
 
-        repo = TaskRepository(mongo_db, settings)
-        log.info("startup.ensure_indexes begin")
-        # await repo.ensure_indexes()
-        log.info("startup.ensure_indexes skipped")
-        app.state.task_repo = repo
-        allocation_repo = AllocationRepository(mongo_db, settings)
-        # await allocation_repo.ensure_indexes()
-        app.state.allocation_repo = allocation_repo
-
-        allocation_service = AllocationService(allocation_repo, redis_client.client)
-        app.state.allocation_service = allocation_service
-
         # Set up HTTP client and ZIP processing worker
         token_provider = OAuth2TokenProvider(
             token_url=settings.oauth2_token_url,
@@ -123,6 +111,22 @@ def create_app() -> FastAPI:
         httpx_client = httpx.AsyncClient(timeout=60.0)
         http_client = OAuth2HttpClient(token_provider=token_provider, client=httpx_client)
         app.state.http_client = http_client
+
+        repo = TaskRepository(mongo_db, settings)
+        log.info("startup.ensure_indexes begin")
+        # await repo.ensure_indexes()
+        log.info("startup.ensure_indexes skipped")
+        app.state.task_repo = repo
+        allocation_repo = AllocationRepository(mongo_db, settings)
+        # await allocation_repo.ensure_indexes()
+        app.state.allocation_repo = allocation_repo
+
+        allocation_service = AllocationService(
+            allocation_repo=allocation_repo,
+            task_repo=repo,
+            user_client=http_client,
+        )
+        app.state.allocation_service = allocation_service
 
         zip_service = ZipProcessingService(
             repo=repo,

@@ -5,7 +5,7 @@ from datetime import datetime
 
 from labelling_task.allocation.errors import NoEligibleUsersError
 from labelling_task.configs.logging_config import get_logger
-from labelling_task.allocation.request import AllocationRequest
+from labelling_task.domain.entities.allocation import AllocationRequest
 
 log = get_logger(__name__)
 

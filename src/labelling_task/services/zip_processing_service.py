@@ -1,6 +1,4 @@
 from labelling_task.webclient.OAuth2HttpClient import OAuth2HttpClient
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -8,7 +6,7 @@ import mimetypes
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Optional, Any
 
 import redis.asyncio as redis
 
@@ -49,7 +47,7 @@ class ZipProcessingService:
         tenant_id: str,
         document_id: str,
         project_external_id: str,
-        request_id: str | None = None,
+        request_id: Optional[str] = None,
     ) -> None:
         """
         Entry point invoked by Redis stream consumer.
@@ -148,8 +146,8 @@ class ZipProcessingService:
         self,
         file_path: Path,
         project: dict[str, Any],
-        media_type: str | None,
-    ) -> str | None:
+        media_type: Optional[str],
+    ) -> Optional[str]:
         """
         Stream-upload a single file as multipart to upload-service, with metadata.
         """

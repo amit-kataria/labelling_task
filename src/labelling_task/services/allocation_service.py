@@ -1,7 +1,8 @@
+from labelling_task.webclient.OAuth2HttpClient import OAuth2HttpClient
 from labelling_task.repositories.task_repository import TaskRepository
 from labelling_task.repositories.allocation_repository import AllocationRepository
 from labelling_task.allocation.strategy_factory import StrategyFactory
-from labelling_task.allocation.request import AllocationRequest
+from labelling_task.domain.entities.allocation import AllocationRequest
 from labelling_task.configs.logging_config import get_logger
 
 log = get_logger(__name__)
@@ -9,9 +10,12 @@ log = get_logger(__name__)
 
 class AllocationService:
     def __init__(
-        self, allocation_repo: AllocationRepository, task_repo: TaskRepository, user_client
+        self,
+        allocation_repo: AllocationRepository,
+        task_repo: TaskRepository,
+        user_client: OAuth2HttpClient,
     ):
-        self._factory = StrategyFactory()
+        self._factory = StrategyFactory(allocation_repo)
         self._task_repo = task_repo
         self._allocation_repo = allocation_repo
         self._user_client = user_client

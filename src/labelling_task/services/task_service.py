@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 from math import ceil
-from typing import Any, List
+from typing import Any, List, Dict, Optional, Tuple, Union
 import uuid
 import asyncio
 import redis.asyncio as redis
@@ -17,7 +17,7 @@ from labelling_task.domain.entities.task import (
     AnnotationItem,
     CommentItem,
 )
-from labelling_task.domain.entities.allocation_request import AllocationRequest
+from labelling_task.domain.entities.allocation import AllocationRequest
 from labelling_task.errors import ForbiddenError
 from labelling_task.services.allocation_service import AllocationService
 from labelling_task.configs.settings import get_settings
@@ -76,7 +76,7 @@ def build_query(filters: dict[str, FilterClause]) -> dict[str, Any]:
     return q
 
 
-def build_projection(fields: list[str] | None) -> dict[str, int] | None:
+def build_projection(fields: Optional[List[str]]) -> Optional[Dict[str, int]]:
     if not fields:
         return None
     proj = {f: 1 for f in fields}
@@ -95,7 +95,7 @@ def build_projection(fields: list[str] | None) -> dict[str, int] | None:
     return proj
 
 
-def build_sort(sort_spec: list[SortSpec] | list[dict[str, str]]) -> list[tuple[str, int]]:
+def build_sort(sort_spec: Union[List[SortSpec], List[Dict[str, str]]]) -> List[Tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for s in sort_spec or []:
         if isinstance(s, SortSpec):
@@ -156,7 +156,7 @@ def merge_annotations(
 def merge_comments(
     existing_comments: List[CommentItem],
     new_comments: List[CommentItem],
-    user_id: str | None = None,
+    user_id: Optional[str] = None,
 ) -> List[CommentItem]:
     """
     Merge comments from new_comments into existing_comments.
